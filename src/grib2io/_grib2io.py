@@ -18,7 +18,7 @@ Interpolation
 As of grib2io v2.4.0, spatial interpolation via [NCEPLIPS-ip](https://github.com/NOAA-EMC/NCEPLIBS-ip)
 Fortran library is now a part of the grib2io package.  The separate component package, grib2io-interp,
 has been deprecated.  grib2io-interp provided interpolation via F2PY interface to
-NCEPLIBS-ip, which has become difficult since the 
+NCEPLIBS-ip, which has become difficult since the
 [removal of distutils](https://peps.python.org/pep-0632/) from Python 3.12+.
 
 NCEPLIBS-ip interpolation Fortran subroutines contain the `BIND(C)` attribute which
@@ -82,6 +82,7 @@ _GZIP_HEADER = b"\x1f\x8b"
 _latlon_datastore = dict()
 _msg_class_store = dict()
 
+
 class open():
     """
     GRIB2 File Object.
@@ -141,6 +142,7 @@ class open():
             File access mode where "r" opens the files for reading only; "w"
             opens the file for overwriting and "x" for writing to a new file.
         """
+        time.sleep(1)
 
         # Manage keywords
         if "_xarray_backend" not in kwargs:
@@ -1652,7 +1654,7 @@ def _data(
         fld = fld1
 
     # Check for reduced grid.
-    if gds[3] > 0 and gds[4] in {0,40} and msg._deflist.shape[0] > 0: 
+    if gds[3] > 0 and gds[4] in {0,40} and msg._deflist.shape[0] > 0:
         from . import redtoreg
         nx = 2*ny
         lonsperlat = msg._deflist
@@ -1985,7 +1987,7 @@ def interpolate_to_stations(
             lons=np.array(lons, dtype=np.float32),
         )
         out = go.reshape(newshp)
-    
+
     elif isinstance(a,tuple):
         # Vector
         km = a[0].shape[0]
@@ -2029,6 +2031,9 @@ class Grib2GridDef:
     """
     gdtn: int
     gdt: NDArray
+
+    def __post_init__(self):
+        self.section3 = self.to_section3()
 
     @classmethod
     def from_section3(cls, section3):
