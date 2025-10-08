@@ -142,7 +142,6 @@ class open():
             File access mode where "r" opens the files for reading only; "w"
             opens the file for overwriting and "x" for writing to a new file.
         """
-        time.sleep(1)
 
         # Manage keywords
         if "_xarray_backend" not in kwargs:

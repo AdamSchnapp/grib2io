@@ -873,21 +873,27 @@ class Grib2ioDataSet:
             f"Datasets do not have a .attrs attribute; use .grib2io.update_attrs({kwargs}) on a DataArray instead."
         )
 
-    def subset(self, lats, lons) -> xr.Dataset:
+    def subset(self,* , lats=None, lons=None) -> xr.Dataset:
         """
-        Subset the DataSet to a region defined by latitudes and longitudes.
+        Subset the DataArray to a box defined by latitudes and/or longitudes.
 
         Parameters
         ----------
         lats
-            Latitude bounds of the region.
+            List or tuple of latitudes.  The 0th and 1st latitudes will
+            be used to define the southern and northern boundaries.
+
+
         lons
-            Longitude bounds of the region.
+            List or tuple of longitudes.  The 0th and 1st longitudes
+            will be used to define the western and eastern boundaries.
+
 
         Returns
         -------
         subset
-            DataSet subset to the region.
+            Dataset subset to the region. 
+            All gridpoints with lat/lon matching contraints are included within subset
         """
         ds = self._obj
 
@@ -1307,7 +1313,7 @@ grib2io update_section3 only works for
 
 
         lons
-            List or tuple of longitudes.  The minimum and maximum longitudes
+            List or tuple of longitudes.  The 0th and 1st longitudes
             will be used to define the western and eastern boundaries.
 
 
@@ -1327,7 +1333,7 @@ grib2io update_section3 only works for
         if lons is not None:
             if len(lons) != 2:
                 raise ValueError("lower and upper lon not provided")
-            # work in common data representation ( degrees > 0)
+            # work in common lon data representation ( degrees > 0)
             lons = np.mod(np.array(lons) + 360, 360)
             lon_da = np.mod(da.longitude + 360, 360)
             lon_left = lons[0]
