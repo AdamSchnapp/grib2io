@@ -77,6 +77,7 @@ import pickle
 import re
 import struct
 import sys
+import textwrap
 import warnings
 
 from numpy.typing import NDArray
@@ -87,6 +88,7 @@ from . import g2clib
 from . import tables
 from . import templates
 from . import utils
+from grib2io.utils import spatial
 
 DEFAULT_DRT_LEN = 20
 DEFAULT_FILL_VALUE = 9.9692099683868690e+36
@@ -1728,81 +1730,78 @@ class _Grib2Message:
         msg.section5[0] = grid_def_out.npoints
         return msg
 
-
-    def subset(self, lats, lons):
+    def subset(self, *, lats=None, lons=None):
         """
-        Return a spatial subset.
+        Subset the DataArray to a box defined by latitudes and/or longitudes.
 
-        Currently only supports regular grids of the following types:
+            Currently supports regular grids of the following types:
 
-        | Grid Type                                                    | gdtn  |
-        | :---:                                                        | :---: |
-        | Latitude/Longitude, Equidistant Cylindrical, or Plate Carree | 0     |
-        | Rotated Latitude/Longitude                                   | 1     |
-        | Mercator                                                     | 10    |
-        | Polar Stereographic                                          | 20    |
-        | Lambert Conformal                                            | 30    |
-        | Albers Equal-Area                                            | 31    |
-        | Gaussian Latitude/Longitude                                  | 40    |
-        | Equatorial Azimuthal Equidistant Projection                  | 110   |
+                +---------------------------------------------------+-------+
+                | Grid Type                                         | gdtn  |
+                +===================================================+=======+
+                | Lat/Lon, Equidistant Cylindrical, or Plate Carree | 0     |
+                +---------------------------------------------------+-------+
+                | Rotated Latitude/Longitude                        | 1     |
+                +---------------------------------------------------+-------+
+                | Mercator                                          | 10    |
+                +---------------------------------------------------+-------+
+                | Polar Stereographic                               | 20    |
+                +---------------------------------------------------+-------+
+                | Lambert Conformal                                 | 30    |
+                +---------------------------------------------------+-------+
+                | Albers Equal-Area                                 | 31    |
+                +---------------------------------------------------+-------+
+                | Gaussian Latitude/Longitude                       | 40    |
+                +---------------------------------------------------+-------+
+                | Equatorial Azimuthal Equidistant Projection       | 110   |
+                +---------------------------------------------------+-------+
 
         Parameters
         ----------
         lats
-            List or tuple of latitudes.  The minimum and maximum latitudes will
-            be used to define the southern and northern boundaries.
-
-            The order of the latitudes is not important.  The function will
-            determine which is the minimum and maximum.
-
-            The latitudes should be in decimal degrees with 0.0 at the equator,
-            positive values in the northern hemisphere increasing to 90, and
-            negative values in the southern hemisphere decreasing to -90.
+            Two item list or tuple of latitudes.  Default is None which will
+            return a subset unbounded by latitude.  The first term defines the
+            southern boundary and the second term defines the northern
+            boundary.
         lons
-            List or tuple of longitudes.  The minimum and maximum longitudes
-            will be used to define the western and eastern boundaries.
-
-            The order of the longitudes is not important.  The function will
-            determine which is the minimum and maximum.
-
-            GRIB2 longitudes should be in decimal degrees with 0.0 at the prime
-            meridian, positive values increasing eastward to 360.  There are no
-            negative GRIB2 longitudes.
-
-            The typical west longitudes that start at 0.0 at the prime meridian
-            and decrease to -180 westward, are converted to GRIB2 longitudes by
-            '360 - (absolute value of the west longitude)' where typical
-            eastern longitudes are unchanged as GRIB2 longitudes.
+            Two item list or tuple of longitudes.  Default is None which will
+            return a subset unbounded by longitude.  The first term defines the
+            western boundary and the second term defines the eastern
+            boundary.  Can follow either: 0 to 360 postive eastward, or 0 to
+            -180 westward / 0 to 180 eastward conventions.  The longitude
+            boundaries cannot cross 0.
 
         Returns
         -------
         subset
-            A spatial subset of a GRIB2 message.
+            DataArray subset to the bounding box created by input 'lats'/'lons'.
+            All gridpoints with lat/lon matching contraints are included within
+            subset.
         """
         if self.gdtn not in [0, 1, 10, 20, 30, 31, 40, 110]:
             raise ValueError(
-                """
-
-Subset only works for
-    Latitude/Longitude, Equidistant Cylindrical, or Plate Carree (gdtn=0)
-    Rotated Latitude/Longitude (gdtn=1)
-    Mercator (gdtn=10)
-    Polar Stereographic (gdtn=20)
-    Lambert Conformal (gdtn=30)
-    Albers Equal-Area (gdtn=31)
-    Gaussian Latitude/Longitude (gdtn=40)
-    Equatorial Azimuthal Equidistant Projection (gdtn=110)
-
-"""
+                textwrap.dedent(
+                    """
+                    Subset only works for:
+                    Latitude/Longitude, Equidistant Cylindrical, or Plate Carree (gdtn=0)
+                    Rotated Latitude/Longitude (gdtn=1)
+                    Mercator (gdtn=10)
+                    Polar Stereographic (gdtn=20)
+                    Lambert Conformal (gdtn=30)
+                    Albers Equal-Area (gdtn=31)
+                    Gaussian Latitude/Longitude (gdtn=40)
+                    Equatorial Azimuthal Equidistant Projection (gdtn=110)
+                    """
+                )
             )
 
         if self.nx == 0 or self.ny == 0:
             raise ValueError(
-                """
-
-Subset only works for regular grids.
-
-"""
+                textwrap.dedent(
+                    """
+                    Subset only works for regular grids.
+                    """
+                )
             )
 
         newmsg = Grib2Message(
@@ -1814,50 +1813,57 @@ Subset only works for regular grids.
             np.copy(self.section5),
         )
 
-        msglats, msglons = self.grid()
+        msg_latitude, inlons = self.grid()
 
-        la1 = np.max(lats)
-        lo1 = np.min(lons)
-        la2 = np.min(lats)
-        lo2 = np.max(lons)
+        spatial.verify_lat_lon_bounds(lats, lons)
 
-        # Find the indices of the first and last grid points to the nearest
-        # lat/lon values in the grid.
-        first_lat = np.abs(msglats - la1)
-        first_lon = np.abs(msglons - lo1)
-        max_idx = np.maximum(first_lat, first_lon)
-        first_j, first_i = np.where(max_idx == np.min(max_idx))
+        if lats is None:
+            lats = (msg_latitude.flatten()[-1], msg_latitude.flatten()[0])
+            lats = (min(lats), max(lats))
 
-        last_lat = np.abs(msglats - la2)
-        last_lon = np.abs(msglons - lo2)
-        max_idx = np.maximum(last_lat, last_lon)
-        last_j, last_i = np.where(max_idx == np.min(max_idx))
+        if lons is None:
+            lons = (inlons.flatten()[0], inlons.flatten()[-1])
 
-        setattr(newmsg, "latitudeFirstGridpoint", msglats[first_j[0], first_i[0]])
-        setattr(newmsg, "longitudeFirstGridpoint", msglons[first_j[0], first_i[0]])
-        setattr(newmsg, "nx", np.abs(first_i[0] - last_i[0]))
-        setattr(newmsg, "ny", np.abs(first_j[0] - last_j[0]))
+        # Internally work in common lon data representation (0->360 positive eastward from 0)
+        lons = np.mod(np.array(lons) + 360, 360)
+        msg_longitude = np.mod(inlons + 360, 360)
+
+        snap_first_point = spatial.snap_to_nearest_cell_center(msg_latitude, msg_longitude, lats[0], lons[0])
+        snap_last_point = spatial.snap_to_nearest_cell_center(msg_latitude, msg_longitude, lats[1], lons[1])
+        lats = (snap_first_point[0], snap_last_point[0])
+        lons = (snap_first_point[1], snap_last_point[1])
+
+        if len(msg_latitude.shape) == 2:
+            mask_lats = np.any((msg_latitude >= lats[0]) & (msg_latitude <= lats[1]), axis=1)
+        else:
+            mask_lats = np.any((msg_latitude >= lats[0]) & (msg_latitude <= lats[1]), axis=0)
+        mask_lons = np.any((msg_longitude >= lons[0]) & (msg_longitude <= lons[1]), axis=0)
+
+        newlats = msg_latitude[mask_lats, :][:, mask_lons]
+        newlons = msg_longitude[mask_lats, :][:, mask_lons]
+
+        setattr(newmsg, "latitudeFirstGridpoint", newlats.flatten()[0])
+        setattr(newmsg, "longitudeFirstGridpoint", newlons.flatten()[0])
+        setattr(newmsg, "nx", np.count_nonzero(mask_lons))
+        setattr(newmsg, "ny", np.count_nonzero(mask_lats))
 
         # Set *LastGridpoint attributes even if only used for gdtn=[0, 1, 40].
-        # This information is used to subset xarray datasets and even though
-        # unnecessary for some supported grid types, it won't affect a grib2io
-        # message to set them.
-        setattr(newmsg, "latitudeLastGridpoint", msglats[last_j[0], last_i[0]])
-        setattr(newmsg, "longitudeLastGridpoint", msglons[last_j[0], last_i[0]])
+        # Even though unnecessary for some supported grid types, it won't
+        # affect a grib2io message to set them.
+        setattr(newmsg, "latitudeLastGridpoint", newlats.flatten()[-1])
+        setattr(newmsg, "longitudeLastGridpoint", newlons.flatten()[-1])
 
         setattr(
             newmsg,
             "data",
-            self.data[
-                min(first_j[0], last_j[0]) : max(first_j[0], last_j[0]),
-                min(first_i[0], last_i[0]) : max(first_i[0], last_i[0]),
-            ].copy(),
+            self.data[mask_lats, :][:, mask_lons],
         )
 
-        # Need to set the newmsg._sha1_section3 to a blank string so the grid
-        # method ignores the cached lat/lon values.  This will force the grid
-        # method to recompute the lat/lon values for the subsetted grid.
-        newmsg._sha1_section3 = ""
+        # Need to reset the '_sha1_section3' attribute to the hash of section 3
+        # so the '.grid()' method ignores the cached lat/lon and instead
+        # force the '.grid()' method to recompute the lat/lon values for the
+        # new, subsetted grid.
+        newmsg._sha1_section3 = hashlib.sha1(newmsg.section3).hexdigest()
         newmsg.grid()
 
         return newmsg
@@ -2247,6 +2253,7 @@ def interpolate_to_stations(
     interpolate_to_stations
         Returns a `numpy.ndarray` of dtype `np.float32` when scalar
         interpolation is performed or a `tuple` of `numpy.ndarray`s
+
         when vector interpolation is performed with the assumptions
         that 0-index is the interpolated u and 1-index is the
         interpolated v.

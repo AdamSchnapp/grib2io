@@ -16,7 +16,8 @@ collected along common coordinates as Datasets and DataTrees.
    implementation details.
 """
 from grib2io._grib2io import _data
-from grib2io import Grib2Message, Grib2GridDef, msgs_from_index
+from grib2io import Grib2Message, Grib2GridDef, msgs_from_index, tables, templates
+from grib2io.utils.spatial import snap_to_nearest_cell_center, verify_lat_lon_bounds
 import grib2io
 from xarray.backends.locks import SerializableLock
 from xarray.core import indexing
@@ -32,8 +33,6 @@ import itertools
 import logging
 import typing
 import warnings
-
-from . import tables
 
 import numpy as np
 import pandas as pd
@@ -576,6 +575,83 @@ class GribBackendArray(BackendArray):
         """Implement thread safe access to data on disk."""
         with self.lock:
             return self.array[key]
+
+class Grid:
+    def __new__(cls, section3):
+        gdtn = section3[4]
+        Gdt = templates.gdt_class_by_gdtn(gdtn)
+
+        @dataclass
+        class _Grid(Gdt):
+            section3: NDArray = field(init=True, repr=True)
+            # Section 3 looked up common attributes.  Other looked up attributes are available according
+            # to the Grid Definition Template.
+            gridDefinitionSection: NDArray = field(
+                init=False, repr=False, default=templates.GridDefinitionSection()
+            )
+            sourceOfGridDefinition: int = field(
+                init=False, repr=False, default=templates.SourceOfGridDefinition()
+            )
+            numberOfDataPoints: int = field(
+                init=False, repr=False, default=templates.NumberOfDataPoints()
+            )
+            interpretationOfListOfNumbers: templates.Grib2Metadata = field(
+                init=False,
+                repr=False,
+                default=templates.InterpretationOfListOfNumbers(),
+            )
+            gridDefinitionTemplateNumber: templates.Grib2Metadata = field(
+                init=False, repr=False, default=templates.GridDefinitionTemplateNumber()
+            )
+            gridDefinitionTemplate: list = field(
+                init=False, repr=False, default=templates.GridDefinitionTemplate()
+            )
+            _earthparams: dict = field(
+                init=False, repr=False, default=templates.EarthParams()
+            )
+            _dxsign: float = field(init=False, repr=False, default=templates.DxSign())
+            _dysign: float = field(init=False, repr=False, default=templates.DySign())
+            _llscalefactor: float = field(
+                init=False, repr=False, default=templates.LLScaleFactor()
+            )
+            _lldivisor: float = field(
+                init=False, repr=False, default=templates.LLDivisor()
+            )
+            _xydivisor: float = field(
+                init=False, repr=False, default=templates.XYDivisor()
+            )
+            shapeOfEarth: templates.Grib2Metadata = field(
+                init=False, repr=False, default=templates.ShapeOfEarth()
+            )
+            earthShape: str = field(
+                init=False, repr=False, default=templates.EarthShape()
+            )
+            earthRadius: float = field(
+                init=False, repr=False, default=templates.EarthRadius()
+            )
+            earthMajorAxis: float = field(
+                init=False, repr=False, default=templates.EarthMajorAxis()
+            )
+            earthMinorAxis: float = field(
+                init=False, repr=False, default=templates.EarthMinorAxis()
+            )
+            resolutionAndComponentFlags: list = field(
+                init=False, repr=False, default=templates.ResolutionAndComponentFlags()
+            )
+            ny: int = field(init=False, repr=False, default=templates.Ny())
+            nx: int = field(init=False, repr=False, default=templates.Nx())
+            scanModeFlags: list = field(
+                init=False, repr=False, default=templates.ScanModeFlags()
+            )
+            projParameters: dict = field(
+                init=False, repr=False, default=templates.ProjParameters()
+            )
+
+            def __post_init__(self):
+                self.gdtn = self.section3[4]
+
+        grid = _Grid(section3)
+        return grid
 
 
 def exclusive_slice_to_inclusive(item: slice):
@@ -1364,27 +1440,37 @@ class Grib2ioDataSet:
             f"Datasets do not have a .attrs attribute; use .grib2io.update_attrs({kwargs}) on a DataArray instead."
         )
 
-    def subset(self, lats, lons) -> xr.Dataset:
+    def subset(self, *, lats=None, lons=None) -> xr.Dataset:
         """
-        Subset the DataSet to a region defined by latitudes and longitudes.
+        Subset the Dataset to a box defined by latitudes and/or longitudes.
 
         Parameters
         ----------
         lats
-            Latitude bounds of the region.
+            Two item list or tuple of latitudes.  Default is None which will
+            return a subset unbounded by latitude.  The first term defines the
+            southern boundary and the second term defines the northern
+            boundary.
         lons
-            Longitude bounds of the region.
+            Two item list or tuple of longitudes.  Default is None which will
+            return a subset unbounded by longitude.  The first term defines the
+            western boundary and the second term defines the eastern
+            boundary.  Can follow either: 0 to 360 postive eastward, or 0 to 
+            -180 westward / 0 to 180 eastward conventions.  The longitude
+            boundaries cannot cross 0.
 
         Returns
         -------
         subset
-            DataSet subset to the region.
+            Dataset subset to the bounding box created by input 'lats'/'lons'.
+            All gridpoints with lat/lon matching contraints are included within
+            subset.
         """
         ds = self._obj
 
         newds = xr.Dataset()
         for shortName in ds:
-            newds[shortName] = ds[shortName].grib2io.subset(lats, lons).copy()
+            newds[shortName] = ds[shortName].grib2io.subset(lats=lats, lons=lons).copy()
 
         return newds
 
@@ -1746,49 +1832,113 @@ class Grib2ioDataArray:
 
         return da
 
-    def subset(self, lats, lons) -> xr.DataArray:
+    def update_section3(self) -> xr.DataArray:
         """
-        Subset the DataArray to a region defined by latitudes and longitudes.
+        Update section3 attributes based on the latitude and longitude corners.
+
+        This makes the GRIB2IO_section3 attribute consistent with the grid's
+        new corners after a change in the spatial extent.
+        """
+        da = self._obj
+        if "GRIB2IO_section3" not in da.attrs:
+            raise ValueError("DataArray has no attr 'GRIB2IO_section3'.  This function only works with Datasets/DataArrrays opened with the 'grib2io' backend.")
+        if "latitude" not in da.coords:
+            raise ValueError("DataArray has no coord 'latitude'")
+        if "longitude" not in da.coords:
+            raise ValueError("DataArray has no coord 'longitude'")
+
+        grid = Grid(da.attrs["GRIB2IO_section3"])
+
+        if grid.gdtn not in [0, 1, 10, 20, 30, 31, 40, 110]:
+            raise ValueError(
+                textwrap.dedent("""\
+                    update_section3 only works for:
+                                
+                    Latitude/Longitude, Equidistant Cylindrical, or Plate Carree (gdtn=0)
+                    Rotated Latitude/Longitude (gdtn=1)
+                    Mercator (gdtn=10)
+                    Polar Stereographic (gdtn=20)
+                    Lambert Conformal (gdtn=30)
+                    Albers Equal-Area (gdtn=31)
+                    Gaussian Latitude/Longitude (gdtn=40)
+                    Equatorial Azimuthal Equidistant Projection (gdtn=110)
+                    """
+                )   
+            )
+
+        grid.latitudeFirstGridpoint = da.latitude.isel(y=0, x=0)
+        grid.longitudeFirstGridpoint = da.longitude.isel(y=0, x=0)
+        grid.nx = len(da.x)
+        grid.ny = len(da.y)
+
+        # last gridpoint does not affect section3 for some gdt but set anyway
+        grid.latitudeLastGridpoint = da.latitude.isel(y=-1, x=-1)
+        grid.longitudeLastGridpoint = da.longitude.isel(y=-1, x=-1)
+
+        da.attrs["GRIB2IO_section3"] = grid.section3
+
+        return da
+
+    def subset(self, *, lats=None, lons=None) -> xr.DataArray:
+        """
+        Subset the DataArray to a box defined by latitudes and/or longitudes.
 
         Parameters
         ----------
         lats
-            Latitude bounds of the region.
+            Two item list or tuple of latitudes.  Default is None which will
+            return a subset unbounded by latitude.  The first term defines the
+            southern boundary and the second term defines the northern
+            boundary.
         lons
-            Longitude bounds of the region.
+            Two item list or tuple of longitudes.  Default is None which will
+            return a subset unbounded by longitude.  The first term defines the
+            western boundary and the second term defines the eastern
+            boundary.  Can follow either: 0 to 360 postive eastward, or 0 to 
+            -180 westward / 0 to 180 eastward conventions.  The longitude
+            boundaries cannot cross 0.
 
         Returns
         -------
         subset
-            DataArray subset to the region.
+            DataArray subset to the bounding box created by input 'lats'/'lons'.
+            All gridpoints with lat/lon matching contraints are included within
+            subset.
         """
-        da = self._obj.copy(deep=True)
+        da = self._obj.copy()
 
-        newmsg = Grib2Message(
-            da.attrs["GRIB2IO_section0"],
-            da.attrs["GRIB2IO_section1"],
-            da.attrs["GRIB2IO_section2"],
-            da.attrs["GRIB2IO_section3"],
-            da.attrs["GRIB2IO_section4"],
-            da.attrs["GRIB2IO_section5"],
-        )
+        verify_lat_lon_bounds(lats, lons)
 
-        newmsg.data = np.zeros((newmsg.ny, newmsg.nx), dtype=np.float32)
+        if lats is None:
+            lats = (np.min(da.latitude), np.max(da.latitude))
 
-        newmsg = newmsg.subset(lats, lons)
+        if lons is None:
+            lons = (np.min(da.longitude), np.max(da.longitude))
 
-        da.attrs["GRIB2IO_section3"] = newmsg.section3
+        # Internally work in common lon data representation (0->360 positive eastward from 0)
+        lons = np.mod(np.array(lons) + 360, 360)
+        lon_da = np.mod(da.longitude + 360, 360)
 
-        mask_lat = (da.latitude >= newmsg.latitudeLastGridpoint) & (
-            da.latitude <= newmsg.latitudeFirstGridpoint
-        )
-        mask_lon = (da.longitude >= newmsg.longitudeFirstGridpoint) & (
-            da.longitude <= newmsg.longitudeLastGridpoint
-        )
+        snap_first_point = snap_to_nearest_cell_center(da.latitude, lon_da, lats[0], lons[0])
+        snap_last_point = snap_to_nearest_cell_center(da.latitude, lon_da, lats[1], lons[1])
+        lats = (snap_first_point[0], snap_last_point[0])
+        lons = (snap_first_point[1], snap_last_point[1])
 
-        del newmsg
+        x = ((lon_da >= lons[0]) & (lon_da <= lons[1])).any("y")
+        if x.chunks:
+            x = x.compute()
 
-        return da.where((mask_lon & mask_lat).compute(), drop=True)
+        y = ((da.latitude >= lats[0]) & (da.latitude <= lats[1])).any("x")
+        if y.chunks:
+            y = y.compute()
+
+        da = da.sel(y=y, x=x)
+        if da.size < 1:
+            raise ValueError("None of grid data is within given lat/lon bounds.")
+
+        da = da.grib2io.update_section3()
+
+        return da
 
 
 def build_datatree_from_grib(filename, file_index, filters=None, stack_vertical=False):
@@ -2448,22 +2598,32 @@ if _HAS_DATATREE:
 
             return new_tree
 
-        def subset(self, lats, lons):
+        def subset(self, *, lats=None, lons=None) -> xr.DataTree:
             """
-            Subset all datasets in the tree to a region.
+            Subset the DataTree to a box defined by latitudes and/or longitudes.
 
             Parameters
             ----------
-            lats : list or tuple
-                Latitude bounds [min_lat, max_lat]
-            lons : list or tuple
-                Longitude bounds [min_lon, max_lon]
+            lats
+                Two item list or tuple of latitudes.  Default is None which will
+                return a subset unbounded by latitude.  The first term defines the
+                southern boundary and the second term defines the northern
+                boundary.
+            lons
+                Two item list or tuple of longitudes.  Default is None which will
+                return a subset unbounded by longitude.  The first term defines the
+                western boundary and the second term defines the eastern
+                boundary.  Can follow either: 0 to 360 postive eastward, or 0 to 
+                -180 westward / 0 to 180 eastward conventions.  The longitude
+                boundaries cannot cross 0.
 
             Returns
             -------
-            xarray.DataTree
-                New DataTree with subset data
-            """
+            subset
+                DataTree subset to the bounding box created by input 'lats'/'lons'.
+                All gridpoints with lat/lon matching contraints are included within
+                subset.
+        """
             new_tree = xr.DataTree()
 
             # Function to recursively process the tree
@@ -2471,7 +2631,7 @@ if _HAS_DATATREE:
                 # If this is a Dataset node with data variables
                 if node.ds is not None and node.ds.data_vars:
                     # Subset dataset
-                    subset_ds = node.ds.grib2io.subset(lats, lons)
+                    subset_ds = node.ds.grib2io.subset(lats=lats, lons=lons)
 
                     # Add to new tree at the same path
                     if node == self._obj:  # Root node
